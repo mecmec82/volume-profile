@@ -7,7 +7,7 @@ from datetime import datetime
 # --- Configuration ---
 OKX_API_BASE = "https://www.okx.com/api/v5/"
 
-# --- Helper Functions to Fetch Data --- 
+# --- Helper Functions to Fetch Data ---
 
 @st.cache_data(ttl=300) # Cache data for 5 minutes
 def get_okx_data(currency: str):
@@ -21,10 +21,11 @@ def get_okx_data(currency: str):
         underlying_asset = f"{currency}-USD"
 
         # Get options summary data
-        summary_url = f"{OKX_API_BASE}public/options-summary"
+        # --- CORRECTED ENDPOINT HERE ---
+        summary_url = f"{OKX_API_BASE}public/option-summary" # Changed from 'options-summary' to 'option-summary'
         summary_params = {"instType": "OPTION", "uly": underlying_asset}
         summary_response = requests.get(summary_url, params=summary_params, timeout=request_timeout)
-        summary_response.raise_for_status()
+        summary_response.raise_for_status() # Raise an exception for HTTP errors
         option_data = summary_response.json().get("data", [])
 
         if not option_data:
@@ -73,7 +74,7 @@ def get_okx_data(currency: str):
         st.error(f"An unexpected error occurred: {e}")
         return pd.DataFrame(), None
 
-# --- Streamlit Dashboard ---
+# --- Rest of your Streamlit Dashboard code remains the same ---
 st.set_page_config(layout="wide", page_title="Crypto Options Dashboard")
 
 st.title("📊 Crypto Options Dashboard (via OKX API)")
