@@ -15,12 +15,15 @@ def get_deribit_data(currency: str):
     Fetches options summary data and index price from Deribit.
     Returns a DataFrame of options data and the current index price.
     """
+    # Define a timeout for the requests in seconds
+    request_timeout = 15 # Give it 15 seconds to connect and receive the first byte
+
     try:
         # Get options book summaries
         summary_url = f"{DERIBIT_API_BASE}get_book_summary_by_currency"
         summary_params = {"currency": currency, "kind": "option"}
-        summary_response = requests.get(summary_url, params=summary_params)
-        summary_response.raise_for_status() # Raise an exception for HTTP errors
+        summary_response = requests.get(summary_url, params=summary_params, timeout=request_timeout) # <--- ADDED TIMEOUT
+        summary_response.raise_for_status() # Raise an exception for HTTP errors (like 4xx or 5xx)
         option_data = summary_response.json().get("result", [])
 
         if not option_data:
@@ -35,19 +38,24 @@ def get_deribit_data(currency: str):
         df['volume_24h'] = pd.to_numeric(df['volume_24h'])
 
         # Extract expiration date from instrument_name
-        # Example instrument_name: BTC-29MAR24-70000-C
         df['expiration_date_str'] = df['instrument_name'].apply(lambda x: x.split('-')[1])
         df['expiration_date'] = pd.to_datetime(df['expiration_date_str'], format='%d%b%y')
 
         # Get current index price
         index_url = f"{DERIBIT_API_BASE}get_index"
         index_params = {"currency": currency}
-        index_response = requests.get(index_url, params=index_params)
+        index_response = requests.get(index_url, params=index_params, timeout=request_timeout) # <--- ADDED TIMEOUT
         index_response.raise_for_status()
         index_price = index_response.json().get("result", {}).get(f"{currency}_usd")
 
         return df, index_price
 
+    # Catch specific timeout error
+    except requests.exceptions.Timeout:
+        st.error(f"Request to Deribit API timed out after {request_timeout} seconds. "
+                 f"This could be due to network issues, a slow connection, or Deribit servers being unresponsive.")
+        return pd.DataFrame(), None
+    # Catch other request-related errors (e.g., HTTP errors, connection refused)
     except requests.exceptions.RequestException as e:
         st.error(f"Error fetching data from Deribit: {e}")
         return pd.DataFrame(), None
@@ -55,7 +63,7 @@ def get_deribit_data(currency: str):
         st.error(f"An unexpected error occurred: {e}")
         return pd.DataFrame(), None
 
-# --- Streamlit Dashboard ---
+# --- Rest of your Streamlit Dashboard code remains the same ---
 st.set_page_config(layout="wide", page_title="Crypto Options Dashboard")
 
 st.title("📊 Crypto Options Dashboard (via Deribit API)")
