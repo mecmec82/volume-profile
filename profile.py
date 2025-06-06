@@ -12,7 +12,7 @@ OKX_API_BASE = "https://www.okx.com/api/v5/"
 @st.cache_data(ttl=300) # Cache data for 5 minutes
 def get_okx_data(currency: str):
     """
-    Fetches options summary data and index price from OKX.
+    Fetches options instrument data (including volume) and index price from OKX.
     Returns a DataFrame of options data and the current index price.
     """
     request_timeout = 15 # Seconds
@@ -20,37 +20,38 @@ def get_okx_data(currency: str):
     try:
         underlying_asset = f"{currency}-USD"
 
-        # Get options summary data
-        # --- CORRECTED ENDPOINT HERE ---
-        summary_url = f"{OKX_API_BASE}public/option-summary" # Changed from 'options-summary' to 'option-summary'
-        summary_params = {"instType": "OPTION", "uly": underlying_asset}
-        summary_response = requests.get(summary_url, params=summary_params, timeout=request_timeout)
-        summary_response.raise_for_status() # Raise an exception for HTTP errors
-        option_data = summary_response.json().get("data", [])
+        # --- CORRECTED OPTIONS ENDPOINT: Use market/instruments for comprehensive data ---
+        options_url = f"{OKX_API_BASE}market/instruments"
+        options_params = {"instType": "OPTION", "uly": underlying_asset} # uly is underlying asset
+        options_response = requests.get(options_url, params=options_params, timeout=request_timeout)
+        options_response.raise_for_status() # Raise an exception for HTTP errors (like 4xx or 5xx)
+        instrument_data = options_response.json().get("data", [])
 
-        if not option_data:
-            st.warning(f"No options data found for {currency} from OKX.")
+        if not instrument_data:
+            st.warning(f"No options data found for {currency} from OKX. Check the currency or API status.")
             return pd.DataFrame(), None
 
-        df = pd.DataFrame(option_data)
+        df = pd.DataFrame(instrument_data)
 
-        # OKX specific parsing
+        # OKX market/instruments specific parsing
         # instId example: BTC-USD-240329-70000-C
+        # stk: Strike price (string)
+        # optType: Option type ('C' for Call, 'P' for Put)
+        # vol24h: 24h volume (string)
+        # expTime: Expiration timestamp in milliseconds (string)
+
         df['instrument_name'] = df['instId']
-        df['strike'] = df['instId'].apply(lambda x: float(x.split('-')[-2]))
-        df['option_type'] = df['instId'].apply(lambda x: 'call' if x.split('-')[-1] == 'C' else 'put')
-        
-        # OKX 24h volume (vol24h is in contracts)
+        df['strike'] = pd.to_numeric(df['stk'], errors='coerce')
+        df['option_type'] = df['optType'].apply(lambda x: 'call' if x == 'C' else 'put')
         df['volume_24h'] = pd.to_numeric(df['vol24h'], errors='coerce').fillna(0)
-
-        # Expiration date from instId (e.g., 240329 -> 2024-03-29)
-        df['expiration_date_str'] = df['instId'].apply(lambda x: x.split('-')[2])
-        df['expiration_date'] = pd.to_datetime(df['expiration_date_str'], format='%y%m%d')
-
-        # Filter for relevant columns
-        df = df[['instrument_name', 'strike', 'option_type', 'volume_24h', 'expiration_date']]
         
-        # Get current index price
+        # Convert expTime (milliseconds timestamp) to datetime
+        df['expiration_date'] = pd.to_datetime(df['expTime'], unit='ms')
+
+        # Filter for relevant columns and drop rows with invalid strike (if coerce failed)
+        df = df[['instrument_name', 'strike', 'option_type', 'volume_24h', 'expiration_date']].dropna(subset=['strike'])
+        
+        # Get current index price (this endpoint was already correct)
         index_url = f"{OKX_API_BASE}market/index-tickers"
         index_params = {"instId": underlying_asset}
         index_response = requests.get(index_url, params=index_params, timeout=request_timeout)
@@ -65,16 +66,16 @@ def get_okx_data(currency: str):
 
     except requests.exceptions.Timeout:
         st.error(f"Request to OKX API timed out after {request_timeout} seconds. "
-                 f"This could be due to network issues, a slow connection, or OKX servers being unresponsive.")
+                 f"This could be due to network issues, a slow connection, or OKX servers being unresponsive. Please try again.")
         return pd.DataFrame(), None
     except requests.exceptions.RequestException as e:
-        st.error(f"Error fetching data from OKX: {e}")
+        st.error(f"Error fetching data from OKX: {e}. Please check the API status or your network.")
         return pd.DataFrame(), None
     except Exception as e:
-        st.error(f"An unexpected error occurred: {e}")
+        st.error(f"An unexpected error occurred during data processing: {e}. Please check the data format.")
         return pd.DataFrame(), None
 
-# --- Rest of your Streamlit Dashboard code remains the same ---
+# --- Streamlit Dashboard ---
 st.set_page_config(layout="wide", page_title="Crypto Options Dashboard")
 
 st.title("📊 Crypto Options Dashboard (via OKX API)")
@@ -98,9 +99,12 @@ if options_df.empty:
     st.info("No data available for the selected currency or an error occurred. Please try again later.")
 else:
     # Get unique expiration dates
-    expiration_dates = sorted(options_df['expiration_date'].unique())
+    # Ensure to get unique dates after conversion to datetime for consistent grouping
+    expiration_dates = sorted(options_df['expiration_date'].dt.normalize().unique()) # Normalize to remove time component
+    
     # Filter out past expiration dates for cleaner display
-    expiration_dates = [d for d in expiration_dates if d >= pd.Timestamp.now().floor('D')]
+    current_date_floor = pd.Timestamp.now().floor('D')
+    expiration_dates = [d for d in expiration_dates if d >= current_date_floor]
 
     if not expiration_dates:
         st.warning(f"No future expiration dates available for {selected_currency}.")
@@ -118,8 +122,8 @@ else:
     if selected_expiration_str:
         selected_expiration = expiration_options[selected_expiration_str]
         
-        # Filter DataFrame by selected expiration
-        filtered_df = options_df[options_df['expiration_date'] == selected_expiration].copy()
+        # Filter DataFrame by selected expiration (compare normalized dates)
+        filtered_df = options_df[options_df['expiration_date'].dt.normalize() == selected_expiration].copy()
 
         if filtered_df.empty:
             st.warning(f"No options data for expiration {selected_expiration_str}. Please select another date.")
@@ -130,8 +134,14 @@ else:
             # Add Asset Price Line (Primary Y-axis)
             if index_price:
                 # Ensure strikes are within a reasonable range for the line
-                min_strike = filtered_df['strike'].min()
-                max_strike = filtered_df['strike'].max()
+                # Handle cases where filtered_df might have no strikes (e.g., if all volume is 0)
+                if not filtered_df.empty:
+                    min_strike = filtered_df['strike'].min()
+                    max_strike = filtered_df['strike'].max()
+                else: # Fallback if no options in filtered_df, maybe use a default range
+                    min_strike = index_price * 0.8
+                    max_strike = index_price * 1.2
+
                 fig.add_trace(go.Scatter(
                     x=[min_strike, max_strike],
                     y=[index_price, index_price],
