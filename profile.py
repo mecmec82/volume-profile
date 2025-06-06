@@ -9,7 +9,7 @@ OKX_API_BASE = "https://www.okx.com/api/v5/"
 
 # --- Helper Functions to Fetch Data ---
 
-@st.cache_data(ttl=300) # Cache data for 5 minutes
+# @st.cache_data(ttl=300) # Temporarily disable caching to ensure fresh requests for debugging
 def get_okx_data(currency: str):
     """
     Fetches options instrument data (including volume) and index price from OKX.
@@ -20,41 +20,60 @@ def get_okx_data(currency: str):
     try:
         underlying_asset = f"{currency}-USD"
 
-        # --- CORRECTED OPTIONS ENDPOINT: Use market/instruments for comprehensive data ---
+        # --- Options Instruments Endpoint ---
         options_url = f"{OKX_API_BASE}market/instruments"
-        options_params = {"instType": "OPTION", "uly": underlying_asset} # uly is underlying asset
-        options_response = requests.get(options_url, params=options_params, timeout=request_timeout)
+        options_params = {"instType": "OPTION", "uly": underlying_asset}
+        
+        # --- Debugging: Print the full URL being requested ---
+        full_options_url = f"{options_url}?{requests.utils.urlencode(options_params)}"
+        st.subheader("⚙️ Debugging API Request:")
+        st.write(f"**1. Requesting Options Instruments URL:** `{full_options_url}`")
+        
+        # Add a User-Agent header to mimic a browser
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+            "Accept": "application/json" # Explicitly request JSON
+        }
+        st.write(f"**2. Request Headers:** `{headers}`")
+
+        options_response = requests.get(options_url, params=options_params, timeout=request_timeout, headers=headers)
+        
+        # --- Debugging: Print status code and response text ---
+        st.write(f"**3. Options Instruments Response Status Code:** `{options_response.status_code}`")
+        st.write(f"**4. Options Instruments Raw Response Content (first 500 chars):** `{options_response.text[:500]}`")
+        
         options_response.raise_for_status() # Raise an exception for HTTP errors (like 4xx or 5xx)
         instrument_data = options_response.json().get("data", [])
 
         if not instrument_data:
-            st.warning(f"No options data found for {currency} from OKX. Check the currency or API status.")
+            st.warning(f"No options data found for {currency} from OKX. Check the currency, underlying asset, or API status.")
             return pd.DataFrame(), None
 
         df = pd.DataFrame(instrument_data)
 
         # OKX market/instruments specific parsing
-        # instId example: BTC-USD-240329-70000-C
-        # stk: Strike price (string)
-        # optType: Option type ('C' for Call, 'P' for Put)
-        # vol24h: 24h volume (string)
-        # expTime: Expiration timestamp in milliseconds (string)
-
         df['instrument_name'] = df['instId']
         df['strike'] = pd.to_numeric(df['stk'], errors='coerce')
         df['option_type'] = df['optType'].apply(lambda x: 'call' if x == 'C' else 'put')
         df['volume_24h'] = pd.to_numeric(df['vol24h'], errors='coerce').fillna(0)
-        
-        # Convert expTime (milliseconds timestamp) to datetime
         df['expiration_date'] = pd.to_datetime(df['expTime'], unit='ms')
 
-        # Filter for relevant columns and drop rows with invalid strike (if coerce failed)
         df = df[['instrument_name', 'strike', 'option_type', 'volume_24h', 'expiration_date']].dropna(subset=['strike'])
         
-        # Get current index price (this endpoint was already correct)
+        # --- Index Price Endpoint ---
         index_url = f"{OKX_API_BASE}market/index-tickers"
         index_params = {"instId": underlying_asset}
-        index_response = requests.get(index_url, params=index_params, timeout=request_timeout)
+        
+        # --- Debugging: Print the full URL being requested for index ---
+        full_index_url = f"{index_url}?{requests.utils.urlencode(index_params)}"
+        st.write(f"**5. Requesting Index Price URL:** `{full_index_url}`")
+
+        index_response = requests.get(index_url, params=index_params, timeout=request_timeout, headers=headers)
+        
+        # --- Debugging: Print status code and response text for index ---
+        st.write(f"**6. Index Price Response Status Code:** `{index_response.status_code}`")
+        st.write(f"**7. Index Price Raw Response Content (first 500 chars):** `{index_response.text[:500]}`")
+
         index_response.raise_for_status()
         index_price_data = index_response.json().get("data", [])
         
@@ -65,17 +84,22 @@ def get_okx_data(currency: str):
         return df, index_price
 
     except requests.exceptions.Timeout:
-        st.error(f"Request to OKX API timed out after {request_timeout} seconds. "
-                 f"This could be due to network issues, a slow connection, or OKX servers being unresponsive. Please try again.")
+        st.error(f"❌ API Request Timed Out after {request_timeout} seconds. This usually indicates network congestion, a slow connection, or the API server being unresponsive. Please check your internet connection and try again.")
+        return pd.DataFrame(), None
+    except requests.exceptions.HTTPError as e:
+        st.error(f"❌ HTTP Error fetching data from OKX: {e}. Status code: {e.response.status_code}. "
+                 f"Response: {e.response.text}")
+        st.info("This often means the URL or parameters are incorrect, or the API has changed.")
         return pd.DataFrame(), None
     except requests.exceptions.RequestException as e:
-        st.error(f"Error fetching data from OKX: {e}. Please check the API status or your network.")
+        st.error(f"❌ General Request Error fetching data from OKX: {e}. "
+                 f"This could be a connection issue (DNS, firewall) or an unexpected API response format.")
         return pd.DataFrame(), None
     except Exception as e:
-        st.error(f"An unexpected error occurred during data processing: {e}. Please check the data format.")
+        st.error(f"❌ An unexpected error occurred during data processing: {e}. This might indicate an issue with the JSON format or data parsing after a successful request.")
         return pd.DataFrame(), None
 
-# --- Streamlit Dashboard ---
+# --- Rest of your Streamlit Dashboard code remains the same ---
 st.set_page_config(layout="wide", page_title="Crypto Options Dashboard")
 
 st.title("📊 Crypto Options Dashboard (via OKX API)")
@@ -92,8 +116,11 @@ st.markdown(
 st.sidebar.header("Controls")
 selected_currency = st.sidebar.selectbox("Select Crypto:", ["BTC", "ETH"])
 
-with st.spinner(f"Fetching {selected_currency} options data..."):
-    options_df, index_price = get_okx_data(selected_currency)
+# Re-enable cache after debugging, but ensure it wraps the function
+# with st.spinner(f"Fetching {selected_currency} options data..."):
+#     options_df, index_price = get_okx_data(selected_currency)
+# Temporarily call directly for debugging
+options_df, index_price = get_okx_data(selected_currency) # No spinner for now, as debug messages appear during call
 
 if options_df.empty:
     st.info("No data available for the selected currency or an error occurred. Please try again later.")
@@ -162,7 +189,7 @@ else:
                     x=calls_df['strike'],
                     y=calls_df['volume_24h'],
                     name='Call Volume (24h)',
-                    marker_color='rgba(0, 150, 250, 0.6)', # Light blue
+                    marker_color='rgba(0, 150, 250, 0.6)', 
                     yaxis='y2',
                     hovertemplate='Strike: %{x}<br>Call Vol: %{y}<extra></extra>'
                 ))
@@ -174,12 +201,11 @@ else:
                     x=puts_df['strike'],
                     y=puts_df['volume_24h'],
                     name='Put Volume (24h)',
-                    marker_color='rgba(255, 100, 100, 0.6)', # Light red
+                    marker_color='rgba(255, 100, 100, 0.6)', 
                     yaxis='y2',
                     hovertemplate='Strike: %{x}<br>Put Vol: %{y}<extra></extra>'
                 ))
 
-            # Update layout for dual Y-axes
             fig.update_layout(
                 title=f'{selected_currency} Options Volume by Strike for {selected_expiration_str}',
                 xaxis_title='Strike Price',
@@ -193,18 +219,17 @@ else:
                     title='24h Volume (Contracts)',
                     titlefont=dict(color='grey'),
                     tickfont=dict(color='grey'),
-                    overlaying='y', # Crucial for secondary axis
+                    overlaying='y', 
                     side='right'
                 ),
                 legend=dict(x=0.01, y=0.99, bgcolor='rgba(255,255,255,0.7)'),
-                hovermode='x unified', # Shows all traces on hover for a given x-value
+                hovermode='x unified', 
                 height=600,
-                template="plotly_dark" # Or "plotly_white" for a lighter theme
+                template="plotly_dark" 
             )
 
             st.plotly_chart(fig, use_container_width=True)
 
-            # Optional: Display raw data
             if st.checkbox("Show raw data"):
                 st.subheader("Raw Data (Filtered)")
                 st.dataframe(filtered_df)
